@@ -1,0 +1,4 @@
+Configuring Cabal-1.22.4.0...                 
+setup: The program 'ghcjs' version >=0.1 is required but the version of
+/home/m/.stack/programs/x86_64-linux/ghcjs-0.2.0.9005001_ghc-7.10.3/src/.stack-work/install/x86_64-linux/lts-5.1/7.10.3/bin/ghcjs
+could not be determined.          

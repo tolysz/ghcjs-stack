@@ -1,0 +1,835 @@
+diff --git a/boot/base/GHC/Conc.hs b/boot/base/GHC/Conc.hs
+index 68182a1..80dff2a 100644
+--- a/boot/base/GHC/Conc.hs
++++ b/boot/base/GHC/Conc.hs
+@@ -93,7 +93,7 @@ module GHC.Conc
+         , asyncWriteBA
+ #endif
+ 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+         , Signal, HandlerFun, setHandler, runHandlers
+ #endif
+ 
+@@ -114,6 +114,6 @@ module GHC.Conc
+ import GHC.Conc.IO
+ import GHC.Conc.Sync
+ 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+ import GHC.Conc.Signal
+ #endif
+diff --git a/boot/base/GHC/Conc/IO.hs b/boot/base/GHC/Conc/IO.hs
+index 3a57c93..994921f 100644
+--- a/boot/base/GHC/Conc/IO.hs
++++ b/boot/base/GHC/Conc/IO.hs
+@@ -59,24 +59,26 @@ import GHC.Conc.Sync as Sync
+ import GHC.Real ( fromIntegral )
+ import System.Posix.Types
+ 
+-#ifdef mingw32_HOST_OS
++#if defined(mingw32_HOST_OS)
+ import qualified GHC.Conc.Windows as Windows
+ import GHC.Conc.Windows (asyncRead, asyncWrite, asyncDoProc, asyncReadBA,
+                          asyncWriteBA, ConsoleEvent(..), win32ConsoleHandler,
+                          toWin32ConsoleEvent)
+-#else
++#elif !defined(ghcjs_HOST_OS)
+ import qualified GHC.Event.Thread as Event
+ #endif
+ 
+ ensureIOManagerIsRunning :: IO ()
+-#ifndef mingw32_HOST_OS
+-ensureIOManagerIsRunning = Event.ensureIOManagerIsRunning
+-#else
++#if defined(mingw32_HOST_OS)
+ ensureIOManagerIsRunning = Windows.ensureIOManagerIsRunning
++#elif defined(ghcjs_HOST_OS)
++ensureIOManagerIsRunning = return ()
++#else
++ensureIOManagerIsRunning = Event.ensureIOManagerIsRunning
+ #endif
+ 
+ ioManagerCapabilitiesChanged :: IO ()
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+ ioManagerCapabilitiesChanged = Event.ioManagerCapabilitiesChanged
+ #else
+ ioManagerCapabilitiesChanged = return ()
+@@ -90,7 +92,7 @@ ioManagerCapabilitiesChanged = return ()
+ -- that has been used with 'threadWaitRead', use 'closeFdWith'.
+ threadWaitRead :: Fd -> IO ()
+ threadWaitRead fd
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+   | threaded  = Event.threadWaitRead fd
+ #endif
+   | otherwise = IO $ \s ->
+@@ -106,7 +108,7 @@ threadWaitRead fd
+ -- that has been used with 'threadWaitWrite', use 'closeFdWith'.
+ threadWaitWrite :: Fd -> IO ()
+ threadWaitWrite fd
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+   | threaded  = Event.threadWaitWrite fd
+ #endif
+   | otherwise = IO $ \s ->
+@@ -120,7 +122,7 @@ threadWaitWrite fd
+ -- in the file descriptor.
+ threadWaitReadSTM :: Fd -> IO (Sync.STM (), IO ())
+ threadWaitReadSTM fd 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+   | threaded  = Event.threadWaitReadSTM fd
+ #endif
+   | otherwise = do
+@@ -139,7 +141,7 @@ threadWaitReadSTM fd
+ -- in the file descriptor.
+ threadWaitWriteSTM :: Fd -> IO (Sync.STM (), IO ())
+ threadWaitWriteSTM fd 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+   | threaded  = Event.threadWaitWriteSTM fd
+ #endif
+   | otherwise = do
+@@ -164,7 +166,7 @@ closeFdWith :: (Fd -> IO ()) -- ^ Low-level action that performs the real close.
+             -> Fd            -- ^ File descriptor to close.
+             -> IO ()
+ closeFdWith close fd
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+   | threaded  = Event.closeFdWith close fd
+ #endif
+   | otherwise = close fd
+@@ -178,9 +180,9 @@ closeFdWith close fd
+ --
+ threadDelay :: Int -> IO ()
+ threadDelay time
+-#ifdef mingw32_HOST_OS
++#if defined(mingw32_HOST_OS)
+   | threaded  = Windows.threadDelay time
+-#else
++#elif !defined(ghcjs_HOST_OS)
+   | threaded  = Event.threadDelay time
+ #endif
+   | otherwise = IO $ \s ->
+@@ -193,9 +195,9 @@ threadDelay time
+ --
+ registerDelay :: Int -> IO (TVar Bool)
+ registerDelay usecs
+-#ifdef mingw32_HOST_OS
++#if defined(mingw32_HOST_OS)
+   | threaded = Windows.registerDelay usecs
+-#else
++#elif !defined(ghcjs_HOST_OS)
+   | threaded = Event.registerDelay usecs
+ #endif
+   | otherwise = error "registerDelay: requires -threaded"
+diff --git a/boot/base/GHC/Conc/Windows.hs b/boot/base/GHC/Conc/Windows.hs
+index 7935a8a..979ed6f 100644
+--- a/boot/base/GHC/Conc/Windows.hs
++++ b/boot/base/GHC/Conc/Windows.hs
+@@ -20,6 +20,9 @@
+ 
+ -- #not-home
+ module GHC.Conc.Windows
++#ifdef ghcjs_HOST_OS
++       () where
++#else
+        ( ensureIOManagerIsRunning
+ 
+        -- * Waiting
+@@ -337,3 +340,4 @@ foreign import ccall unsafe "sendIOManagerEvent" -- in the RTS (ThrIOManager.c)
+ foreign import WINDOWS_CCONV "WaitForSingleObject"
+    c_WaitForSingleObject :: HANDLE -> DWORD -> IO DWORD
+ 
++#endif
+diff --git a/boot/base/GHC/Event.hs b/boot/base/GHC/Event.hs
+index 436914c..c41abfc 100644
+--- a/boot/base/GHC/Event.hs
++++ b/boot/base/GHC/Event.hs
+@@ -1,5 +1,6 @@
+ {-# LANGUAGE Trustworthy #-}
+ {-# LANGUAGE NoImplicitPrelude #-}
++{-# LANGUAGE CPP #-}
+ 
+ -- ----------------------------------------------------------------------------
+ -- | This module provides scalable event notification for file
+@@ -10,6 +11,9 @@
+ -- ----------------------------------------------------------------------------
+ 
+ module GHC.Event
++#ifdef ghcjs_HOST_OS
++    ( ) where
++#else
+     ( -- * Types
+       EventManager
+     , TimerManager
+@@ -43,3 +47,4 @@ import GHC.Event.TimerManager (TimeoutCallback, TimeoutKey, registerTimeout,
+                                updateTimeout, unregisterTimeout, TimerManager)
+ import GHC.Event.Thread (getSystemEventManager, getSystemTimerManager)
+ 
++#endif
+diff --git a/boot/base/GHC/Event/Manager.hs b/boot/base/GHC/Event/Manager.hs
+index 11b01ad..4de059b 100644
+--- a/boot/base/GHC/Event/Manager.hs
++++ b/boot/base/GHC/Event/Manager.hs
+@@ -19,6 +19,9 @@
+ -- polling if available. Otherwise we use multi-shot polling.
+ 
+ module GHC.Event.Manager
++#ifdef ghcjs_HOST_OS
++    () where
++#else
+     ( -- * Types
+       EventManager
+ 
+@@ -497,3 +500,6 @@ nullToNothing xs@(_:_) = Just xs
+ 
+ unless :: Monad m => Bool -> m () -> m ()
+ unless p = when (not p)
++
++#endif
++
+diff --git a/boot/base/GHC/Event/Thread.hs b/boot/base/GHC/Event/Thread.hs
+index d4b6792..5983d0e 100644
+--- a/boot/base/GHC/Event/Thread.hs
++++ b/boot/base/GHC/Event/Thread.hs
+@@ -1,7 +1,11 @@
+ {-# LANGUAGE Trustworthy #-}
+ {-# LANGUAGE BangPatterns, NoImplicitPrelude #-}
++{-# LANGUAGE CPP #-}
+ 
+ module GHC.Event.Thread
++#ifdef ghcjs_HOST_OS
++    ( ) where
++#else
+     ( getSystemEventManager
+     , getSystemTimerManager
+     , ensureIOManagerIsRunning
+@@ -360,3 +364,6 @@ foreign import ccall unsafe "setIOManagerControlFd"
+ 
+ foreign import ccall unsafe "setTimerManagerControlFd"
+    c_setTimerManagerControlFd :: CInt -> IO ()
++
++#endif
++
+diff --git a/boot/base/GHC/Event/TimerManager.hs b/boot/base/GHC/Event/TimerManager.hs
+index c1ab64c..2184869 100644
+--- a/boot/base/GHC/Event/TimerManager.hs
++++ b/boot/base/GHC/Event/TimerManager.hs
+@@ -8,6 +8,9 @@
+   #-}
+ 
+ module GHC.Event.TimerManager
++#ifdef ghcjs_HOST_OS
++    () where
++#else
+     ( -- * Types
+       TimerManager
+ 
+@@ -241,3 +244,4 @@ updateTimeout mgr (TK key) us = do
+ editTimeouts :: TimerManager -> TimeoutEdit -> IO ()
+ editTimeouts mgr g = atomicModifyIORef' (emTimeouts mgr) $ \tq -> (g tq, ())
+ 
++#endif
+diff --git a/boot/base/GHC/IO/Encoding.hs b/boot/base/GHC/IO/Encoding.hs
+index 31683b4..c730184 100644
+--- a/boot/base/GHC/IO/Encoding.hs
++++ b/boot/base/GHC/IO/Encoding.hs
+@@ -140,8 +140,11 @@ mkGlobal x = unsafePerformIO $ do
+ 
+ -- | @since 4.5.0.0
+ initLocaleEncoding, initFileSystemEncoding, initForeignEncoding :: TextEncoding
+-
+-#if !defined(mingw32_HOST_OS)
++#if defined(ghcjs_HOST_OS)
++initLocaleEncoding     = utf8
++initFileSystemEncoding = utf8
++initForeignEncoding    = utf8
++#elif !defined(mingw32_HOST_OS)
+ -- It is rather important that we don't just call Iconv.mkIconvEncoding here
+ -- because some iconvs (in particular GNU iconv) will brokenly UTF-8 encode
+ -- lone surrogates without complaint.
+diff --git a/boot/base/GHC/IO/Encoding/CodePage/API.hs b/boot/base/GHC/IO/Encoding/CodePage/API.hs
+index 966a690..84b2db6 100644
+--- a/boot/base/GHC/IO/Encoding/CodePage/API.hs
++++ b/boot/base/GHC/IO/Encoding/CodePage/API.hs
+@@ -29,6 +29,7 @@ import GHC.ForeignPtr (castForeignPtr)
+ 
+ import System.Posix.Internals
+ 
++#ifndef ghcjs_HOST_OS
+ 
+ c_DEBUG_DUMP :: Bool
+ c_DEBUG_DUMP = False
+@@ -426,3 +427,8 @@ cpRecode try' is_valid_prefix max_i_size min_o_size iscale oscale = go
+             -- Must have interpreted all given bytes successfully
+             -- We need to iterate until we have consumed the complete contents of the buffer
+             Right wrote_elts -> go (bufferRemove n ibuf) (obuf { bufR = bufR obuf + wrote_elts })
++
++#else
++mkCodePageEncoding :: String
++mkCodePageEncoding = ""
++#endif
+diff --git a/boot/base/GHC/IO/FD.hs b/boot/base/GHC/IO/FD.hs
+index 610c9ea..774ac69 100644
+--- a/boot/base/GHC/IO/FD.hs
++++ b/boot/base/GHC/IO/FD.hs
+@@ -500,6 +500,10 @@ indicates that there's no data, we call threadWaitRead.
+ 
+ readRawBufferPtr :: String -> FD -> Ptr Word8 -> Int -> CSize -> IO Int
+ readRawBufferPtr loc !fd buf off len
++#ifdef ghcjs_HOST_OS
++  = fmap fromIntegral . uninterruptibleMask_ $
++    throwErrnoIfMinus1 loc (c_read (fdFD fd) (buf `plusPtr` off) len)
++#else
+   | isNonBlocking fd = unsafe_read -- unsafe is ok, it can't block
+   | otherwise    = do r <- throwErrnoIfMinus1 loc
+                                 (unsafe_fdReady (fdFD fd) 0 0 0)
+@@ -513,10 +517,19 @@ readRawBufferPtr loc !fd buf off len
+     read        = if threaded then safe_read else unsafe_read
+     unsafe_read = do_read (c_read (fdFD fd) (buf `plusPtr` off) len)
+     safe_read   = do_read (c_safe_read (fdFD fd) (buf `plusPtr` off) len)
++#endif
+ 
+ -- return: -1 indicates EOF, >=0 is bytes read
+ readRawBufferPtrNoBlock :: String -> FD -> Ptr Word8 -> Int -> CSize -> IO Int
+ readRawBufferPtrNoBlock loc !fd buf off len
++#ifdef ghcjs_HOST_OS
++  = uninterruptibleMask_ $ do
++      r <- throwErrnoIfMinus1 loc (c_read (fdFD fd) (buf `plusPtr` off) len)
++      case r of
++       (-1) -> return 0
++       0    -> return (-1)
++       n    -> return (fromIntegral n)
++#else
+   | isNonBlocking fd  = unsafe_read -- unsafe is ok, it can't block
+   | otherwise    = do r <- unsafe_fdReady (fdFD fd) 0 0 0
+                       if r /= 0 then safe_read
+@@ -530,9 +543,14 @@ readRawBufferPtrNoBlock loc !fd buf off len
+                        n    -> return (fromIntegral n)
+    unsafe_read  = do_read (c_read (fdFD fd) (buf `plusPtr` off) len)
+    safe_read    = do_read (c_safe_read (fdFD fd) (buf `plusPtr` off) len)
++#endif
+ 
+ writeRawBufferPtr :: String -> FD -> Ptr Word8 -> Int -> CSize -> IO CInt
+ writeRawBufferPtr loc !fd buf off len
++#ifdef ghcjs_HOST_OS
++  = fmap fromIntegral . uninterruptibleMask_ $
++    throwErrnoIfMinus1 loc (c_write (fdFD fd) (buf `plusPtr` off) len)
++#else
+   | isNonBlocking fd = unsafe_write -- unsafe is ok, it can't block
+   | otherwise   = do r <- unsafe_fdReady (fdFD fd) 1 0 0
+                      if r /= 0
+@@ -545,9 +563,17 @@ writeRawBufferPtr loc !fd buf off len
+     write         = if threaded then safe_write else unsafe_write
+     unsafe_write  = do_write (c_write (fdFD fd) (buf `plusPtr` off) len)
+     safe_write    = do_write (c_safe_write (fdFD fd) (buf `plusPtr` off) len)
++#endif
+ 
+ writeRawBufferPtrNoBlock :: String -> FD -> Ptr Word8 -> Int -> CSize -> IO CInt
+ writeRawBufferPtrNoBlock loc !fd buf off len
++#ifdef ghcjs_HOST_OS
++  = uninterruptibleMask_ $ do
++      r <- throwErrnoIfMinus1 loc (c_write (fdFD fd) (buf `plusPtr` off) len)
++      case r of
++        (-1) -> return 0
++        n    -> return (fromIntegral n)
++#else
+   | isNonBlocking fd = unsafe_write -- unsafe is ok, it can't block
+   | otherwise   = do r <- unsafe_fdReady (fdFD fd) 1 0 0
+                      if r /= 0 then write
+@@ -560,9 +586,14 @@ writeRawBufferPtrNoBlock loc !fd buf off len
+     write         = if threaded then safe_write else unsafe_write
+     unsafe_write  = do_write (c_write (fdFD fd) (buf `plusPtr` off) len)
+     safe_write    = do_write (c_safe_write (fdFD fd) (buf `plusPtr` off) len)
++#endif
+ 
+ isNonBlocking :: FD -> Bool
++#ifdef ghcjs_HOST_OS
++isNonBlocking _  = True
++#else
+ isNonBlocking fd = fdIsNonBlocking fd /= 0
++#endif
+ 
+ foreign import ccall unsafe "fdReady"
+   unsafe_fdReady :: CInt -> CInt -> CInt -> CInt -> IO CInt
+@@ -646,7 +677,7 @@ foreign import ccall "rtsSupportsBoundThreads" threaded :: Bool
+ -- -----------------------------------------------------------------------------
+ -- utils
+ 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+ throwErrnoIfMinus1RetryOnBlock  :: String -> IO CSsize -> IO CSsize -> IO CSsize
+ throwErrnoIfMinus1RetryOnBlock loc f on_block  =
+   do
+diff --git a/boot/base/GHC/Stack.hsc b/boot/base/GHC/Stack.hsc
+index 0aa4d17..ee56621 100644
+--- a/boot/base/GHC/Stack.hsc
++++ b/boot/base/GHC/Stack.hsc
+@@ -15,7 +15,7 @@
+ -- @since 4.5.0.0
+ -----------------------------------------------------------------------------
+ 
+-{-# LANGUAGE UnboxedTuples, MagicHash, NoImplicitPrelude #-}
++{-# LANGUAGE CPP, UnboxedTuples, MagicHash, NoImplicitPrelude #-}
+ module GHC.Stack (
+     -- * Call stack
+     currentCallStack,
+@@ -63,6 +63,22 @@ getCCSOf obj = IO $ \s ->
+    case getCCSOf## obj s of
+      (## s', addr ##) -> (## s', Ptr addr ##)
+ 
++##ifdef ghcjs_HOST_OS
++ccsCC :: Ptr CostCentreStack -> IO (Ptr CostCentre)
++ccsCC p = peekByteOff p 4
++
++ccsParent :: Ptr CostCentreStack -> IO (Ptr CostCentreStack)
++ccsParent p = peekByteOff p 8
++
++ccLabel :: Ptr CostCentre -> IO CString
++ccLabel p = peekByteOff p 4
++
++ccModule :: Ptr CostCentre -> IO CString
++ccModule p = peekByteOff p 8
++
++ccSrcSpan :: Ptr CostCentre -> IO CString
++ccSrcSpan p = peekByteOff p 12
++##else
+ ccsCC :: Ptr CostCentreStack -> IO (Ptr CostCentre)
+ ccsCC p = (# peek CostCentreStack, cc) p
+ 
+@@ -77,6 +93,7 @@ ccModule p = (# peek CostCentre, module) p
+ 
+ ccSrcSpan :: Ptr CostCentre -> IO CString
+ ccSrcSpan p = (# peek CostCentre, srcloc) p
++##endif
+ 
+ -- | returns a '[String]' representing the current call stack.  This
+ -- can be useful for debugging.
+diff --git a/boot/base/GHC/Stats.hsc b/boot/base/GHC/Stats.hsc
+index 7bcc221..378ca67 100644
+--- a/boot/base/GHC/Stats.hsc
++++ b/boot/base/GHC/Stats.hsc
+@@ -1,3 +1,4 @@
++{-# LANGUAGE CPP #-}
+ {-# LANGUAGE Trustworthy #-}
+ {-# LANGUAGE NoImplicitPrelude #-}
+ {-# LANGUAGE RecordWildCards #-}
+@@ -100,6 +101,28 @@ getGCStats = do
+     "getGCStats: GC stats not enabled. Use `+RTS -T -RTS' to enable them."
+     Nothing
+     Nothing
++##ifdef ghcjs_HOST_OS
++  allocaBytes 144 $ \p -> do
++    getGCStats_ p
++    bytesAllocated <- peekByteOff p 0
++    numGcs <- peekByteOff p 8
++    numByteUsageSamples <- peekByteOff p 16
++    maxBytesUsed <- peekByteOff p 24
++    cumulativeBytesUsed <- peekByteOff p 32
++    bytesCopied <- peekByteOff p 40
++    currentBytesUsed <- peekByteOff p 48
++    currentBytesSlop <- peekByteOff p 56
++    maxBytesSlop <- peekByteOff p 64
++    peakMegabytesAllocated <- peekByteOff p 72
++    mutatorCpuSeconds <- peekByteOff p 80
++    mutatorWallSeconds <- peekByteOff p 88
++    gcCpuSeconds <- peekByteOff p 96
++    gcWallSeconds <- peekByteOff p 104
++    cpuSeconds <- peekByteOff p 112
++    wallSeconds <- peekByteOff p 120
++    parTotBytesCopied <- peekByteOff p 128
++    parMaxBytesCopied <- peekByteOff p 136
++##else
+   allocaBytes (#size GCStats) $ \p -> do
+     getGCStats_ p
+     bytesAllocated <- (# peek GCStats, bytes_allocated) p
+@@ -124,6 +147,7 @@ getGCStats = do
+     wallSeconds <- (# peek GCStats, wall_seconds) p
+     parTotBytesCopied <- (# peek GCStats, par_tot_bytes_copied) p
+     parMaxBytesCopied <- (# peek GCStats, par_max_bytes_copied) p
++##endif
+     return GCStats { .. }
+ 
+ {-
+diff --git a/boot/base/GHC/TopHandler.hs b/boot/base/GHC/TopHandler.hs
+index d7c0038..9518de3 100644
+--- a/boot/base/GHC/TopHandler.hs
++++ b/boot/base/GHC/TopHandler.hs
+@@ -68,7 +68,9 @@ runMainIO main =
+       topHandler
+ 
+ install_interrupt_handler :: IO () -> IO ()
+-#ifdef mingw32_HOST_OS
++#if defined(ghcjs_HOST_OS)
++install_interrupt_handler _ = return ()
++#elif defined(mingw32_HOST_OS)
+ install_interrupt_handler handler = do
+   _ <- GHC.ConsoleHandler.installHandler $
+      Catch $ \event ->
+@@ -182,7 +184,7 @@ unreachable :: IO a
+ unreachable = fail "If you can read this, shutdownHaskellAndExit did not exit."
+ 
+ exitHelper :: CInt -> Int -> IO a
+-#ifdef mingw32_HOST_OS
++#if defined(mingw32_HOST_OS) || defined(ghcjs_HOST_OS)
+ exitHelper exitKind r =
+   shutdownHaskellAndExit (fromIntegral r) exitKind >> unreachable
+ #else
+@@ -204,7 +206,7 @@ foreign import ccall "shutdownHaskellAndSignal"
+ 
+ exitInterrupted :: IO a
+ exitInterrupted =
+-#ifdef mingw32_HOST_OS
++#if defined(mingw32_HOST_OS) || defined(ghcjs_HOST_OS)
+   safeExit 252
+ #else
+   -- we must exit via the default action for SIGINT, so that the
+diff --git a/boot/base/GHC/Windows.hs b/boot/base/GHC/Windows.hs
+index 45032d5..7f1e83b 100644
+--- a/boot/base/GHC/Windows.hs
++++ b/boot/base/GHC/Windows.hs
+@@ -21,6 +21,10 @@
+ -----------------------------------------------------------------------------
+ 
+ module GHC.Windows (
++#ifdef ghcjs_HOST_OS
++                   ) where
++
++#else
+         -- * Types
+         BOOL,
+         LPBOOL,
+@@ -194,3 +198,5 @@ foreign import WINDOWS_CCONV unsafe "windows.h LocalFree"
+ -- | Get the last system error produced in the current thread.
+ foreign import WINDOWS_CCONV unsafe "windows.h GetLastError"
+     getLastError :: IO ErrCode
++
++#endif
+diff --git a/boot/base/System/CPUTime.hsc b/boot/base/System/CPUTime.hsc
+index e09439c..2640ac9 100644
+--- a/boot/base/System/CPUTime.hsc
++++ b/boot/base/System/CPUTime.hsc
+@@ -24,6 +24,14 @@ module System.CPUTime
+          cpuTimePrecision  -- :: Integer
+         ) where
+ 
++##ifdef ghcjs_HOST_OS
++getCPUTime :: IO Integer
++getCPUTime = return 0
++
++cpuTimePrecision :: Integer
++cpuTimePrecision = 1
++##else
++
+ import Data.Ratio
+ 
+ import Foreign
+@@ -159,3 +167,4 @@ foreign import ccall unsafe clk_tck :: CLong
+ 
+ clockTicks :: Int
+ clockTicks = fromIntegral clk_tck
++##endif
+diff --git a/boot/base/System/Environment/ExecutablePath.hsc b/boot/base/System/Environment/ExecutablePath.hsc
+index 410e3ac..34f0a2a 100644
+--- a/boot/base/System/Environment/ExecutablePath.hsc
++++ b/boot/base/System/Environment/ExecutablePath.hsc
+@@ -18,6 +18,13 @@
+ 
+ module System.Environment.ExecutablePath ( getExecutablePath ) where
+ 
++##if defined(ghcjs_HOST_OS)
++
++getExecutablePath :: IO FilePath
++getExecutablePath = return "a.jsexe"
++
++##else
++
+ -- The imports are purposely kept completely disjoint to prevent edits
+ -- to one OS implementation from breaking another.
+ 
+@@ -173,3 +180,5 @@ getExecutablePath =
+ --------------------------------------------------------------------------------
+ 
+ #endif
++
++##endif
+\ No newline at end of file
+diff --git a/boot/base/System/Posix/Internals.hs b/boot/base/System/Posix/Internals.hs
+index c49e613..f52326a 100644
+--- a/boot/base/System/Posix/Internals.hs
++++ b/boot/base/System/Posix/Internals.hs
+@@ -1,6 +1,9 @@
+ {-# LANGUAGE Trustworthy #-}
+ {-# LANGUAGE CPP, NoImplicitPrelude, CApiFFI #-}
+ {-# OPTIONS_HADDOCK hide #-}
++#ifdef ghcjs_HOST_OS
++{-# LANGUAGE JavaScriptFFI #-}
++#endif
+ 
+ -----------------------------------------------------------------------------
+ -- |
+@@ -134,7 +137,7 @@ ioe_unknownfiletype = IOError Nothing UnsupportedOperation "fdType"
+                         Nothing
+ 
+ fdGetMode :: FD -> IO IOMode
+-#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
++#if defined(mingw32_HOST_OS) || defined(__MINGW32__) || defined(ghcjs_HOST_OS)
+ fdGetMode _ = do
+     -- We don't have a way of finding out which flags are set on FDs
+     -- on Windows, so make a handle that thinks that anything goes.
+@@ -314,7 +317,7 @@ foreign import ccall unsafe "consUtils.h is_console__"
+ -- Turning on non-blocking for a file descriptor
+ 
+ setNonBlockingFD :: FD -> Bool -> IO ()
+-#if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
++#if !defined(mingw32_HOST_OS) && !defined(__MINGW32__) && !defined(ghcjs_HOST_OS)
+ setNonBlockingFD fd set = do
+   flags <- throwErrnoIfMinus1Retry "setNonBlockingFD"
+                  (c_fcntl_read fd const_f_getfl)
+@@ -336,7 +339,7 @@ setNonBlockingFD _ _ = return ()
+ -- -----------------------------------------------------------------------------
+ -- Set close-on-exec for a file descriptor
+ 
+-#if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
++#if !defined(mingw32_HOST_OS) && !defined(__MINGW32__) && !defined(ghcjs_HOST_OS)
+ setCloseOnExec :: FD -> IO ()
+ setCloseOnExec fd = do
+   throwErrnoIfMinus1_ "setCloseOnExec" $
+@@ -352,6 +355,139 @@ type CFilePath = CString
+ type CFilePath = CWString
+ #endif
+ 
++#ifdef ghcjs_HOST_OS
++
++foreign import javascript interruptible "h$base_access($1_1,$1_2,$2,$c);"
++    c_access :: CString -> CInt -> IO CInt
++foreign import javascript interruptible "h$base_chmod($1_1,$1_2,$2,$c);"
++    c_chmod :: CString -> CMode -> IO CInt
++foreign import javascript interruptible "h$base_close($1,$c);"
++    c_close :: CInt -> IO CInt
++foreign import javascript interruptible "h$base_creat($1,$c);"
++    c_creat :: CString -> CMode -> IO CInt
++foreign import javascript interruptible "h$base_dup($1,$c);"
++    c_dup :: CInt -> IO CInt
++foreign import javascript interruptible "h$base_dup2($1,$2,$c);"
++    c_dup2 :: CInt -> CInt -> IO CInt
++foreign import javascript interruptible "h$base_fstat($1,$2_1,$2_2,$c);" -- fixme wrong type
++    c_fstat :: CInt -> Ptr CStat -> IO CInt
++foreign import javascript unsafe "$r = h$base_isatty($1);"
++    c_isatty :: CInt -> IO CInt
++foreign import javascript interruptible "h$base_lseek($1,$2_1,$2_2,$3,$c);"
++   c_lseek :: CInt -> Int64 -> CInt -> IO Int64
++foreign import javascript interruptible "h$base_lstat($1_1,$1_2,$2_1,$2_2,$c);" -- fixme wrong type
++   lstat :: CFilePath -> Ptr CStat -> IO CInt
++foreign import javascript interruptible "h$base_open($1_1,$1_2,$2,$3,$c);"
++   c_open :: CFilePath -> CInt -> CMode -> IO CInt
++foreign import javascript interruptible "h$base_open($1_1,$1_2,$2,$3,$c);"
++   c_safe_open :: CFilePath -> CInt -> CMode -> IO CInt
++foreign import javascript interruptible "h$base_read($1,$2_1,$2_2,$3,$c);"
++   c_read :: CInt -> Ptr Word8 -> CSize -> IO CSsize
++foreign import javascript interruptible "h$base_read($1,$2_1,$2_2,$3,$c);"
++   c_safe_read :: CInt -> Ptr Word8 -> CSize -> IO CSsize
++foreign import javascript interruptible "h$base_stat($1_1,$1_2,$2_1,$2_2,$c);" -- fixme wrong type
++   c_stat :: CFilePath -> Ptr CStat -> IO CInt
++foreign import javascript unsafe "$r = h$base_umask($1);"
++   c_umask :: CMode -> IO CMode
++foreign import javascript interruptible "h$base_write($1,$2_1,$2_2,$3,$c);"
++   c_write :: CInt -> Ptr Word8 -> CSize -> IO CSsize
++foreign import javascript interruptible "h$base_write($1,$2_1,$2_2,$3,$c);"
++   c_safe_write :: CInt -> Ptr Word8 -> CSize -> IO CSsize
++foreign import javascript interruptible "h$base_ftruncate($1,$2_1,$2_2,$c);" -- fixme COff
++   c_ftruncate :: CInt -> Int64 -> IO CInt
++foreign import javascript interruptible "h$base_unlink($1_1,$1_2,$c);"
++   c_unlink :: CString -> IO CInt
++foreign import javascript unsafe "$r = h$base_getpid();"
++   c_getpid :: IO CPid
++-- foreign import ccall unsafe "HsBase.h fork"
++--   c_fork :: IO CPid 
++foreign import javascript interruptible "h$base_link($1_1,$1_2,$2_1,$2_2,$c);"
++   c_link :: CString -> CString -> IO CInt
++foreign import javascript interruptible "h$base_mkfifo($1_1,$1_2,$2,$c);"
++   c_mkfifo :: CString -> CMode -> IO CInt
++-- foreign import javascript interruptible "h$base_pipe($1_1,$1_2,$c);"
++--   c_pipe :: Ptr CInt -> IO CInt
++foreign import javascript unsafe "$r = h$base_sigemptyset($1_1,$1_2);"
++   c_sigemptyset :: Ptr CSigset -> IO CInt
++foreign import javascript unsafe "$r = h$base_sigaddset($1_1,$1_2,$2);"
++   c_sigaddset :: Ptr CSigset -> CInt -> IO CInt
++foreign import javascript unsafe "$r = h$base_sigprocmask($1,$2_1,$2_2,$3_1,$3_2);"
++   c_sigprocmask :: CInt -> Ptr CSigset -> Ptr CSigset -> IO CInt
++foreign import javascript unsafe "$r = h$base_tcgetattr($1,$2_1,$2_2);"
++   c_tcgetattr :: CInt -> Ptr CTermios -> IO CInt
++foreign import javascript unsafe "$r = h$base_tcsetattr($1,$2,$3_1,$3_2);"
++   c_tcsetattr :: CInt -> CInt -> Ptr CTermios -> IO CInt
++foreign import javascript unsafe "$r = h$base_utime($1_1,$1_2,$2_1,$2_2);" -- should this be async?
++   c_utime :: CString -> Ptr CUtimbuf -> IO CInt
++foreign import javascript interruptible "h$base_waitpid($1,$2_1,$2_2,$3,$c);"
++   c_waitpid :: CPid -> Ptr CInt -> CInt -> IO CPid
++
++foreign import javascript unsafe "$r = h$base_o_rdonly;"   o_RDONLY   :: CInt
++foreign import javascript unsafe "$r = h$base_o_wronly;"   o_WRONLY   :: CInt
++foreign import javascript unsafe "$r = h$base_o_rdwr;"     o_RDWR     :: CInt
++foreign import javascript unsafe "$r = h$base_o_append;"   o_APPEND   :: CInt
++foreign import javascript unsafe "$r = h$base_o_creat;"    o_CREAT    :: CInt
++foreign import javascript unsafe "$r = h$base_o_excl;"     o_EXCL     :: CInt
++foreign import javascript unsafe "$r = h$base_o_trunc;"    o_TRUNC    :: CInt
++foreign import javascript unsafe "$r = h$base_o_noctty;"   o_NOCTTY   :: CInt
++foreign import javascript unsafe "$r = h$base_o_nonblock;" o_NONBLOCK :: CInt
++foreign import javascript unsafe "$r = h$base_o_binary;"   o_BINARY   :: CInt
++
++foreign import javascript unsafe "$r = h$base_c_s_isreg($1);"  c_s_isreg  :: CMode -> CInt
++foreign import javascript unsafe "$r = h$base_c_s_ischr($1);"  c_s_ischr  :: CMode -> CInt
++foreign import javascript unsafe "$r = h$base_c_s_isblk($1);"  c_s_isblk  :: CMode -> CInt
++foreign import javascript unsafe "$r = h$base_c_s_isdir($1);"  c_s_isdir  :: CMode -> CInt
++foreign import javascript unsafe "$r = h$base_c_s_isfifo($1);" c_s_isfifo :: CMode -> CInt
++
++s_isreg  :: CMode -> Bool
++s_isreg cm = c_s_isreg cm /= 0
++s_ischr  :: CMode -> Bool
++s_ischr cm = c_s_ischr cm /= 0
++s_isblk  :: CMode -> Bool
++s_isblk cm = c_s_isblk cm /= 0
++s_isdir  :: CMode -> Bool
++s_isdir cm = c_s_isdir cm /= 0
++s_isfifo :: CMode -> Bool
++s_isfifo cm = c_s_isfifo cm /= 0
++
++foreign import javascript unsafe "$r = h$base_sizeof_stat;" sizeof_stat :: Int
++foreign import javascript unsafe "h$base_st_mtime($1_1,$1_2)" st_mtime :: Ptr CStat -> IO CTime
++foreign import javascript unsafe "$r1 = h$base_st_size($1_1,$1_2); $r2 = h$ret1;" st_size :: Ptr CStat -> IO Int64
++foreign import javascript unsafe "$r = h$base_st_mode($1_1,$1_2);" st_mode :: Ptr CStat -> IO CMode
++foreign import javascript unsafe "$r = h$base_st_dev($1_1,$1_2);" st_dev :: Ptr CStat -> IO CDev
++foreign import javascript unsafe "$r1 = h$base_st_ino($1_1,$1_2); $r2 = h$ret1;" st_ino :: Ptr CStat -> IO CIno
++
++foreign import javascript unsafe "$r = h$base_echo;"            const_echo :: CInt
++foreign import javascript unsafe "$r = h$base_tcsanow;"         const_tcsanow :: CInt
++foreign import javascript unsafe "$r = h$base_icanon;"          const_icanon :: CInt
++foreign import javascript unsafe "$r = h$base_vmin;"            const_vmin   :: CInt
++foreign import javascript unsafe "$r = h$base_vtime;"           const_vtime  :: CInt
++foreign import javascript unsafe "$r = h$base_sigttou;"         const_sigttou :: CInt
++foreign import javascript unsafe "$r = h$base_sig_block;"       const_sig_block :: CInt
++foreign import javascript unsafe "$r = h$base_sig_setmask;"     const_sig_setmask :: CInt
++foreign import javascript unsafe "$r = h$base_f_getfl;"         const_f_getfl :: CInt
++foreign import javascript unsafe "$r = h$base_f_setfl;"         const_f_setfl :: CInt
++foreign import javascript unsafe "$r = h$base_f_setfd;"         const_f_setfd :: CInt
++foreign import javascript unsafe "$r = h$base_fd_cloexec;"      const_fd_cloexec :: CLong
++foreign import javascript unsafe "$r = h$base_sizeof_termios;"  sizeof_termios :: Int
++foreign import javascript unsafe "$r = h$base_sizeof_sigset_t;" sizeof_sigset_t :: Int
++foreign import javascript unsafe "$r = h$base_lflag($1_1,$1_2);"           c_lflag :: Ptr CTermios -> IO CTcflag
++foreign import javascript unsafe "h$base_poke_lflag($1_1,$1_2,$2);"      poke_c_lflag :: Ptr CTermios -> CTcflag -> IO ()
++foreign import javascript unsafe "$r1 = h$base_ptr_c_cc($1_1,$1_2); $r2 = h$ret_1;"   ptr_c_cc  :: Ptr CTermios -> IO (Ptr Word8)
++s_issock :: CMode -> Bool
++s_issock cmode = c_s_issock cmode /= 0
++foreign import javascript unsafe "h$base_c_s_issock($1)"          c_s_issock :: CMode -> CInt
++foreign import javascript unsafe "$r = h$base_default_buffer_size;" dEFAULT_BUFFER_SIZE :: Int
++foreign import javascript unsafe "$r = h$base_SEEK_CUR;"            sEEK_CUR :: CInt
++foreign import javascript unsafe "$r = h$base_SEEK_SET;"            sEEK_SET :: CInt
++foreign import javascript unsafe "$r = h$base_SEEK_END"             sEEK_END :: CInt
++
++-- fixme, unclear if these can be supported, remove?
++foreign import javascript unsafe "$r = h$base_c_fcntl_read($1,$2)"            c_fcntl_read  :: CInt -> CInt -> IO CInt
++foreign import javascript unsafe "$r = h$base_c_fcntl_write($1,$2,$3);"       c_fcntl_write :: CInt -> CInt -> CLong -> IO CInt
++foreign import javascript unsafe "$r = h$base_c_fcntl_lock($1,$2,$3_1,$3_2);" c_fcntl_lock  :: CInt -> CInt -> Ptr CFLock -> IO CInt
++
++#else
+ foreign import ccall unsafe "HsBase.h access"
+    c_access :: CString -> CInt -> IO CInt
+ 
+@@ -551,6 +687,8 @@ foreign import capi  unsafe "stdio.h value SEEK_CUR" sEEK_CUR :: CInt
+ foreign import capi  unsafe "stdio.h value SEEK_SET" sEEK_SET :: CInt
+ foreign import capi  unsafe "stdio.h value SEEK_END" sEEK_END :: CInt
+ 
++#endif
++
+ {-
+ Note: CSsize
+ 
+diff --git a/boot/base/System/Timeout.hs b/boot/base/System/Timeout.hs
+index 73b5910..c4c5cdf 100644
+--- a/boot/base/System/Timeout.hs
++++ b/boot/base/System/Timeout.hs
+@@ -18,7 +18,7 @@
+ 
+ module System.Timeout ( timeout ) where
+ 
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+ import Control.Monad
+ import GHC.Event           (getSystemTimerManager,
+                             registerTimeout, unregisterTimeout)
+@@ -79,7 +79,7 @@ timeout :: Int -> IO a -> IO (Maybe a)
+ timeout n f
+     | n <  0    = fmap Just f
+     | n == 0    = return Nothing
+-#ifndef mingw32_HOST_OS
++#if !defined(mingw32_HOST_OS) && !defined(ghcjs_HOST_OS)
+     | rtsSupportsBoundThreads = do
+         -- In the threaded RTS, we use the Timer Manager to delay the
+         -- (fairly expensive) 'forkIO' call until the timeout has expired.
+diff --git a/boot/base/base.cabal b/boot/base/base.cabal
+index 1172f2a..b949dc9 100644
+--- a/boot/base/base.cabal
++++ b/boot/base/base.cabal
+@@ -50,7 +50,7 @@ Flag integer-simple
+ Flag integer-gmp
+     Description: Use integer-gmp
+     Manual: True
+-    Default: False
++    Default: True
+ 
+ Flag integer-gmp2
+     Description: Use integer-gmp2
+@@ -325,7 +325,7 @@ Library
+         Typeable.h
+ 
+     -- OS Specific
+-    if os(windows)
++    if os(windows) && !impl(ghcjs)
+         extra-libraries: wsock32, user32, shell32
+         exposed-modules:
+             GHC.IO.Encoding.CodePage.API
+@@ -333,23 +333,24 @@ Library
+             GHC.Conc.Windows
+             GHC.Windows
+     else
+-        exposed-modules:
+-            GHC.Event
+-        other-modules:
+-            GHC.Event.Arr
+-            GHC.Event.Array
+-            GHC.Event.Clock
+-            GHC.Event.Control
+-            GHC.Event.EPoll
+-            GHC.Event.IntTable
+-            GHC.Event.Internal
+-            GHC.Event.KQueue
+-            GHC.Event.Manager
+-            GHC.Event.PSQ
+-            GHC.Event.Poll
+-            GHC.Event.Thread
+-            GHC.Event.TimerManager
+-            GHC.Event.Unique
++        if !impl(ghcjs)
++            exposed-modules:
++                GHC.Event
++            other-modules:
++                GHC.Event.Arr
++                GHC.Event.Array
++                GHC.Event.Clock
++                GHC.Event.Control
++                GHC.Event.EPoll
++                GHC.Event.IntTable
++                GHC.Event.Internal
++                GHC.Event.KQueue
++                GHC.Event.Manager
++                GHC.Event.PSQ
++                GHC.Event.Poll
++                GHC.Event.Thread
++                GHC.Event.TimerManager
++                GHC.Event.Unique
+ 
+     -- We need to set the package key to base (without a version number)
+     -- as it's magic.

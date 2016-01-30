@@ -1,0 +1,627 @@
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Distribution.Client.InstallPlan
+-- Copyright   :  (c) Duncan Coutts 2008
+-- License     :  BSD-like
+--
+-- Maintainer  :  duncan@community.haskell.org
+-- Stability   :  provisional
+-- Portability :  portable
+--
+-- Package installation plan
+--
+-----------------------------------------------------------------------------
+module Distribution.Client.InstallPlan (
+  InstallPlan,
+  ConfiguredPackage(..),
+  PlanPackage(..),
+
+  -- * Operations on 'InstallPlan's
+  new,
+  toList,
+  ready,
+  processing,
+  completed,
+  failed,
+  remove,
+  showPlanIndex,
+  showInstallPlan,
+
+  -- ** Query functions
+  planPlatform,
+  planCompiler,
+
+  -- * Checking validity of plans
+  valid,
+  closed,
+  consistent,
+  acyclic,
+  configuredPackageValid,
+
+  -- ** Details on invalid plans
+  PlanProblem(..),
+  showPlanProblem,
+  PackageProblem(..),
+  showPackageProblem,
+  problems,
+  configuredPackageProblems
+  ) where
+
+import Distribution.Client.Types
+         ( SourcePackage(packageDescription), ConfiguredPackage(..)
+         , ReadyPackage(..), readyPackageToConfiguredPackage
+         , InstalledPackage, BuildFailure, BuildSuccess(..), enableStanzas
+         , InstalledPackage(..), fakeInstalledPackageId )
+import Distribution.Package
+         ( PackageIdentifier(..), PackageName(..), Package(..), packageName
+         , PackageFixedDeps(..), Dependency(..), InstalledPackageId
+         , PackageInstalled(..) )
+import Distribution.Version
+         ( Version, withinRange )
+import Distribution.PackageDescription
+         ( GenericPackageDescription(genPackageFlags)
+         , Flag(flagName), FlagName(..) )
+import Distribution.Client.PackageUtils
+         ( externalBuildDepends )
+import Distribution.PackageDescription.Configuration
+         ( finalizePackageDescription )
+import Distribution.Simple.PackageIndex
+         ( PackageIndex, FakeMap )
+import qualified Distribution.Simple.PackageIndex as PackageIndex
+import Distribution.Text
+         ( display )
+import Distribution.System
+         ( Platform )
+import Distribution.Compiler
+         ( CompilerInfo(..) )
+import Distribution.Client.Utils
+         ( duplicates, duplicatesBy, mergeBy, MergeResult(..) )
+import Distribution.Simple.Utils
+         ( comparing, intercalate )
+import qualified Distribution.InstalledPackageInfo as Installed
+
+import Data.List
+         ( sort, sortBy )
+import Data.Maybe
+         ( fromMaybe, maybeToList )
+import qualified Data.Graph as Graph
+import Data.Graph (Graph)
+import Control.Exception
+         ( assert )
+import Data.Maybe (catMaybes)
+import qualified Data.Map as Map
+
+type PlanIndex = PackageIndex PlanPackage
+
+-- When cabal tries to install a number of packages, including all their
+-- dependencies it has a non-trivial problem to solve.
+--
+-- The Problem:
+--
+-- In general we start with a set of installed packages and a set of source
+-- packages.
+--
+-- Installed packages have fixed dependencies. They have already been built and
+-- we know exactly what packages they were built against, including their exact
+-- versions.
+--
+-- Source package have somewhat flexible dependencies. They are specified as
+-- version ranges, though really they're predicates. To make matters worse they
+-- have conditional flexible dependencies. Configuration flags can affect which
+-- packages are required and can place additional constraints on their
+-- versions.
+--
+-- These two sets of package can and usually do overlap. There can be installed
+-- packages that are also available as source packages which means they could
+-- be re-installed if required, though there will also be packages which are
+-- not available as source and cannot be re-installed. Very often there will be
+-- extra versions available than are installed. Sometimes we may like to prefer
+-- installed packages over source ones or perhaps always prefer the latest
+-- available version whether installed or not.
+--
+-- The goal is to calculate an installation plan that is closed, acyclic and
+-- consistent and where every configured package is valid.
+--
+-- An installation plan is a set of packages that are going to be used
+-- together. It will consist of a mixture of installed packages and source
+-- packages along with their exact version dependencies. An installation plan
+-- is closed if for every package in the set, all of its dependencies are
+-- also in the set. It is consistent if for every package in the set, all
+-- dependencies which target that package have the same version.
+
+-- Note that plans do not necessarily compose. You might have a valid plan for
+-- package A and a valid plan for package B. That does not mean the composition
+-- is simultaneously valid for A and B. In particular you're most likely to
+-- have problems with inconsistent dependencies.
+-- On the other hand it is true that every closed sub plan is valid.
+
+data PlanPackage = PreExisting InstalledPackage
+                 | Configured  ConfiguredPackage
+                 | Processing  ReadyPackage
+                 | Installed   ReadyPackage BuildSuccess
+                 | Failed      ConfiguredPackage BuildFailure
+                   -- ^ NB: packages in the Failed state can be *either* Ready
+                   -- or Configured.
+
+instance Package PlanPackage where
+  packageId (PreExisting pkg) = packageId pkg
+  packageId (Configured  pkg) = packageId pkg
+  packageId (Processing pkg)  = packageId pkg
+  packageId (Installed pkg _) = packageId pkg
+  packageId (Failed    pkg _) = packageId pkg
+
+instance PackageFixedDeps PlanPackage where
+  depends (PreExisting pkg) = depends pkg
+  depends (Configured  pkg) = depends pkg
+  depends (Processing pkg)  = depends pkg
+  depends (Installed pkg _) = depends pkg
+  depends (Failed    pkg _) = depends pkg
+
+instance PackageInstalled PlanPackage where
+  installedPackageId (PreExisting pkg)   = installedPackageId pkg
+  installedPackageId (Configured  pkg)   = installedPackageId pkg
+  installedPackageId (Processing  pkg)   = installedPackageId pkg
+  -- NB: defer to the actual installed package info in this case
+  installedPackageId (Installed _ (BuildOk _ _ (Just ipkg))) = installedPackageId ipkg
+  installedPackageId (Installed   pkg _) = installedPackageId pkg
+  installedPackageId (Failed      pkg _) = installedPackageId pkg
+
+  installedDepends (PreExisting pkg) = installedDepends pkg
+  installedDepends (Configured  pkg) = installedDepends pkg
+  installedDepends (Processing pkg)  = installedDepends pkg
+  installedDepends (Installed _ (BuildOk _ _ (Just ipkg))) = installedDepends ipkg
+  installedDepends (Installed pkg _) = installedDepends pkg
+  installedDepends (Failed    pkg _) = installedDepends pkg
+
+data InstallPlan = InstallPlan {
+    planIndex    :: PlanIndex,
+    planFakeMap  :: FakeMap,
+    planGraph    :: Graph,
+    planGraphRev :: Graph,
+    planPkgOf    :: Graph.Vertex -> PlanPackage,
+    planVertexOf :: InstalledPackageId -> Graph.Vertex,
+    planPlatform :: Platform,
+    planCompiler :: CompilerInfo
+  }
+
+invariant :: InstallPlan -> Bool
+invariant plan =
+  valid (planPlatform plan) (planCompiler plan) (planFakeMap plan) (planIndex plan)
+
+internalError :: String -> a
+internalError msg = error $ "InstallPlan: internal error: " ++ msg
+
+showPlanIndex :: PlanIndex -> String
+showPlanIndex index =
+    intercalate "\n" (map showPlanPackage (PackageIndex.allPackages index))
+  where showPlanPackage p =
+            showPlanPackageTag p ++ " "
+                ++ display (packageId p) ++ " ("
+                ++ display (installedPackageId p) ++ ")"
+
+showInstallPlan :: InstallPlan -> String
+showInstallPlan plan =
+    showPlanIndex (planIndex plan) ++ "\n" ++
+    "fake map:\n  " ++ intercalate "\n  " (map showKV (Map.toList (planFakeMap plan)))
+  where showKV (k,v) = display k ++ " -> " ++ display v
+
+showPlanPackageTag :: PlanPackage -> String
+showPlanPackageTag (PreExisting _) = "PreExisting"
+showPlanPackageTag (Configured _)  = "Configured"
+showPlanPackageTag (Processing _)  = "Processing"
+showPlanPackageTag (Installed _ _) = "Installed"
+showPlanPackageTag (Failed _ _)    = "Failed"
+
+-- | Build an installation plan from a valid set of resolved packages.
+--
+new :: Platform -> CompilerInfo -> PlanIndex
+    -> Either [PlanProblem] InstallPlan
+new platform cinfo index =
+  -- NB: Need to pre-initialize the fake-map with pre-existing
+  -- packages
+  let isPreExisting (PreExisting _) = True
+      isPreExisting _ = False
+      fakeMap = Map.fromList
+              . map (\p -> (fakeInstalledPackageId (packageId p), installedPackageId p))
+              . filter isPreExisting
+              $ PackageIndex.allPackages index in
+  case problems platform cinfo fakeMap index of
+    [] -> Right InstallPlan {
+            planIndex    = index,
+            planFakeMap  = fakeMap,
+            planGraph    = graph,
+            planGraphRev = Graph.transposeG graph,
+            planPkgOf    = vertexToPkgId,
+            planVertexOf = fromMaybe noSuchPkgId . pkgIdToVertex,
+            planPlatform = platform,
+            planCompiler = cinfo
+          }
+      where (graph, vertexToPkgId, pkgIdToVertex) =
+              PackageIndex.dependencyGraph index
+              -- NB: doesn't need to know planFakeMap because the
+              -- fakemap is empty at this point.
+            noSuchPkgId = internalError "package is not in the graph"
+    probs -> Left probs
+
+toList :: InstallPlan -> [PlanPackage]
+toList = PackageIndex.allPackages . planIndex
+
+-- | Remove packages from the install plan. This will result in an
+-- error if there are remaining packages that depend on any matching
+-- package. This is primarily useful for obtaining an install plan for
+-- the dependencies of a package or set of packages without actually
+-- installing the package itself, as when doing development.
+--
+remove :: (PlanPackage -> Bool)
+       -> InstallPlan
+       -> Either [PlanProblem] InstallPlan
+remove shouldRemove plan =
+    new (planPlatform plan) (planCompiler plan) newIndex
+  where
+    newIndex = PackageIndex.fromList $
+                 filter (not . shouldRemove) (toList plan)
+
+-- | The packages that are ready to be installed. That is they are in the
+-- configured state and have all their dependencies installed already.
+-- The plan is complete if the result is @[]@.
+--
+ready :: InstallPlan -> [ReadyPackage]
+ready plan = assert check readyPackages
+  where
+    check = if null readyPackages && null processingPackages
+              then null configuredPackages
+              else True
+    configuredPackages = [ pkg | Configured pkg <- toList plan ]
+    processingPackages = [ pkg | Processing pkg <- toList plan]
+
+    readyPackages :: [ReadyPackage]
+    readyPackages =
+      [ ReadyPackage srcPkg flags stanzas deps
+      | pkg@(ConfiguredPackage srcPkg flags stanzas _) <- configuredPackages
+        -- select only the package that have all of their deps installed:
+      , deps <- maybeToList (hasAllInstalledDeps pkg)
+      ]
+
+    hasAllInstalledDeps :: ConfiguredPackage -> Maybe [Installed.InstalledPackageInfo]
+    hasAllInstalledDeps = mapM isInstalledDep . installedDepends
+
+    isInstalledDep :: InstalledPackageId -> Maybe Installed.InstalledPackageInfo
+    isInstalledDep pkgid =
+      -- NB: Need to check if the ID has been updated in planFakeMap, in which case we
+      -- might be dealing with an old pointer
+      case PackageIndex.fakeLookupInstalledPackageId (planFakeMap plan) (planIndex plan) pkgid of
+        Just (Configured  _)                            -> Nothing
+        Just (Processing  _)                            -> Nothing
+        Just (Failed    _ _)                            -> internalError depOnFailed
+        Just (PreExisting (InstalledPackage instPkg _)) -> Just instPkg
+        Just (Installed _ (BuildOk _ _ (Just instPkg))) -> Just instPkg
+        Just (Installed _ (BuildOk _ _ Nothing))        -> internalError depOnNonLib
+        Nothing                                         -> internalError incomplete
+    incomplete  = "install plan is not closed"
+    depOnFailed = "configured package depends on failed package"
+    depOnNonLib = "configured package depends on a non-library package"
+
+-- | Marks packages in the graph as currently processing (e.g. building).
+--
+-- * The package must exist in the graph and be in the configured state.
+--
+processing :: [ReadyPackage] -> InstallPlan -> InstallPlan
+processing pkgs plan = assert (invariant plan') plan'
+  where
+    plan' = plan {
+              planIndex = PackageIndex.merge (planIndex plan) processingPkgs
+            }
+    processingPkgs = PackageIndex.fromList [Processing pkg | pkg <- pkgs]
+
+-- | Marks a package in the graph as completed. Also saves the build result for
+-- the completed package in the plan.
+--
+-- * The package must exist in the graph and be in the processing state.
+-- * The package must have had no uninstalled dependent packages.
+--
+completed :: InstalledPackageId
+          -> BuildSuccess
+          -> InstallPlan -> InstallPlan
+completed pkgid buildResult plan = assert (invariant plan') plan'
+  where
+    plan'     = plan {
+                  -- NB: installation can change the IPID, so better
+                  -- record it in the fake mapping...
+                  planFakeMap = insert_fake_mapping buildResult
+                              $ planFakeMap plan,
+                  planIndex = PackageIndex.insert installed
+                            . PackageIndex.deleteInstalledPackageId pkgid
+                            $ planIndex plan
+                }
+    -- ...but be sure to use the *old* IPID for the lookup for the
+    -- preexisting record
+    installed = Installed (lookupProcessingPackage plan pkgid) buildResult
+    insert_fake_mapping (BuildOk _ _ (Just ipi)) = Map.insert pkgid (installedPackageId ipi)
+    insert_fake_mapping _ = id
+
+-- | Marks a package in the graph as having failed. It also marks all the
+-- packages that depended on it as having failed.
+--
+-- * The package must exist in the graph and be in the processing
+-- state.
+--
+failed :: InstalledPackageId -- ^ The id of the package that failed to install
+       -> BuildFailure      -- ^ The build result to use for the failed package
+       -> BuildFailure      -- ^ The build result to use for its dependencies
+       -> InstallPlan
+       -> InstallPlan
+failed pkgid buildResult buildResult' plan = assert (invariant plan') plan'
+  where
+    -- NB: failures don't update IPIDs
+    plan'    = plan {
+                 planIndex = PackageIndex.merge (planIndex plan) failures
+               }
+    pkg      = lookupProcessingPackage plan pkgid
+    failures = PackageIndex.fromList
+             $ Failed (readyPackageToConfiguredPackage pkg) buildResult
+             : [ Failed pkg' buildResult'
+               | Just pkg' <- map checkConfiguredPackage
+                            $ packagesThatDependOn plan pkgid ]
+
+-- | Lookup the reachable packages in the reverse dependency graph.
+--
+packagesThatDependOn :: InstallPlan
+                     -> InstalledPackageId -> [PlanPackage]
+packagesThatDependOn plan pkgid = map (planPkgOf plan)
+                          . tail
+                          . Graph.reachable (planGraphRev plan)
+                          . planVertexOf plan
+                          $ Map.findWithDefault pkgid pkgid (planFakeMap plan)
+
+-- | Lookup a package that we expect to be in the processing state.
+--
+lookupProcessingPackage :: InstallPlan
+                        -> InstalledPackageId -> ReadyPackage
+lookupProcessingPackage plan pkgid =
+  -- NB: processing packages are guaranteed to not indirect through
+  -- planFakeMap
+  case PackageIndex.lookupInstalledPackageId (planIndex plan) pkgid of
+    Just (Processing pkg) -> pkg
+    _  -> internalError $ "not in processing state or no such pkg " ++ display pkgid
+
+-- | Check a package that we expect to be in the configured or failed state.
+--
+checkConfiguredPackage :: PlanPackage -> Maybe ConfiguredPackage
+checkConfiguredPackage (Configured pkg) = Just pkg
+checkConfiguredPackage (Failed     _ _) = Nothing
+checkConfiguredPackage pkg                =
+  internalError $ "not configured or no such pkg " ++ display (packageId pkg)
+
+-- ------------------------------------------------------------
+-- * Checking validity of plans
+-- ------------------------------------------------------------
+
+-- | A valid installation plan is a set of packages that is 'acyclic',
+-- 'closed' and 'consistent'. Also, every 'ConfiguredPackage' in the
+-- plan has to have a valid configuration (see 'configuredPackageValid').
+--
+-- * if the result is @False@ use 'problems' to get a detailed list.
+--
+valid :: Platform -> CompilerInfo -> FakeMap -> PlanIndex -> Bool
+valid platform cinfo fakeMap index = null (problems platform cinfo fakeMap index)
+
+data PlanProblem =
+     PackageInvalid       ConfiguredPackage [PackageProblem]
+   | PackageMissingDeps   PlanPackage [PackageIdentifier]
+   | PackageCycle         [PlanPackage]
+   | PackageInconsistency PackageName [(PackageIdentifier, Version)]
+   | PackageStateInvalid  PlanPackage PlanPackage
+
+showPlanProblem :: PlanProblem -> String
+showPlanProblem (PackageInvalid pkg packageProblems) =
+     "Package " ++ display (packageId pkg)
+  ++ " has an invalid configuration, in particular:\n"
+  ++ unlines [ "  " ++ showPackageProblem problem
+             | problem <- packageProblems ]
+
+showPlanProblem (PackageMissingDeps pkg missingDeps) =
+     "Package " ++ display (packageId pkg)
+  ++ " depends on the following packages which are missing from the plan: "
+  ++ intercalate ", " (map display missingDeps)
+
+showPlanProblem (PackageCycle cycleGroup) =
+     "The following packages are involved in a dependency cycle "
+  ++ intercalate ", " (map (display.packageId) cycleGroup)
+
+showPlanProblem (PackageInconsistency name inconsistencies) =
+     "Package " ++ display name
+  ++ " is required by several packages,"
+  ++ " but they require inconsistent versions:\n"
+  ++ unlines [ "  package " ++ display pkg ++ " requires "
+                            ++ display (PackageIdentifier name ver)
+             | (pkg, ver) <- inconsistencies ]
+
+showPlanProblem (PackageStateInvalid pkg pkg') =
+     "Package " ++ display (packageId pkg)
+  ++ " is in the " ++ showPlanState pkg
+  ++ " state but it depends on package " ++ display (packageId pkg')
+  ++ " which is in the " ++ showPlanState pkg'
+  ++ " state"
+  where
+    showPlanState (PreExisting _) = "pre-existing"
+    showPlanState (Configured  _) = "configured"
+    showPlanState (Processing _)  = "processing"
+    showPlanState (Installed _ _) = "installed"
+    showPlanState (Failed    _ _) = "failed"
+
+-- | For an invalid plan, produce a detailed list of problems as human readable
+-- error messages. This is mainly intended for debugging purposes.
+-- Use 'showPlanProblem' for a human readable explanation.
+--
+problems :: Platform -> CompilerInfo -> FakeMap
+         -> PlanIndex -> [PlanProblem]
+problems platform cinfo fakeMap index =
+     [ PackageInvalid pkg packageProblems
+     | Configured pkg <- PackageIndex.allPackages index
+     , let packageProblems = configuredPackageProblems platform cinfo pkg
+     , not (null packageProblems) ]
+
+  ++ [ PackageMissingDeps pkg (catMaybes (map (fmap packageId . PackageIndex.fakeLookupInstalledPackageId fakeMap index) missingDeps))
+     | (pkg, missingDeps) <- PackageIndex.brokenPackages' fakeMap index ]
+
+  ++ [ PackageCycle cycleGroup
+     | cycleGroup <- PackageIndex.dependencyCycles' fakeMap index ]
+
+  ++ [ PackageInconsistency name inconsistencies
+     | (name, inconsistencies) <- PackageIndex.dependencyInconsistencies' fakeMap index ]
+
+  ++ [ PackageStateInvalid pkg pkg'
+     | pkg <- PackageIndex.allPackages index
+     , Just pkg' <- map (PackageIndex.fakeLookupInstalledPackageId fakeMap index) (installedDepends pkg)
+     , not (stateDependencyRelation pkg pkg') ]
+
+-- | The graph of packages (nodes) and dependencies (edges) must be acyclic.
+--
+-- * if the result is @False@ use 'PackageIndex.dependencyCycles' to find out
+--   which packages are involved in dependency cycles.
+--
+acyclic :: PlanIndex -> Bool
+acyclic = null . PackageIndex.dependencyCycles
+
+-- | An installation plan is closed if for every package in the set, all of
+-- its dependencies are also in the set. That is, the set is closed under the
+-- dependency relation.
+--
+-- * if the result is @False@ use 'PackageIndex.brokenPackages' to find out
+--   which packages depend on packages not in the index.
+--
+closed :: PlanIndex -> Bool
+closed = null . PackageIndex.brokenPackages
+
+-- | An installation plan is consistent if all dependencies that target a
+-- single package name, target the same version.
+--
+-- This is slightly subtle. It is not the same as requiring that there be at
+-- most one version of any package in the set. It only requires that of
+-- packages which have more than one other package depending on them. We could
+-- actually make the condition even more precise and say that different
+-- versions are OK so long as they are not both in the transitive closure of
+-- any other package (or equivalently that their inverse closures do not
+-- intersect). The point is we do not want to have any packages depending
+-- directly or indirectly on two different versions of the same package. The
+-- current definition is just a safe approximation of that.
+--
+-- * if the result is @False@ use 'PackageIndex.dependencyInconsistencies' to
+--   find out which packages are.
+--
+consistent :: PlanIndex -> Bool
+consistent = null . PackageIndex.dependencyInconsistencies
+
+-- | The states of packages have that depend on each other must respect
+-- this relation. That is for very case where package @a@ depends on
+-- package @b@ we require that @dependencyStatesOk a b = True@.
+--
+stateDependencyRelation :: PlanPackage -> PlanPackage -> Bool
+stateDependencyRelation (PreExisting _) (PreExisting _) = True
+
+stateDependencyRelation (Configured  _) (PreExisting _) = True
+stateDependencyRelation (Configured  _) (Configured  _) = True
+stateDependencyRelation (Configured  _) (Processing  _) = True
+stateDependencyRelation (Configured  _) (Installed _ _) = True
+
+stateDependencyRelation (Processing  _) (PreExisting _) = True
+stateDependencyRelation (Processing  _) (Installed _ _) = True
+
+stateDependencyRelation (Installed _ _) (PreExisting _) = True
+stateDependencyRelation (Installed _ _) (Installed _ _) = True
+
+stateDependencyRelation (Failed    _ _) (PreExisting _) = True
+-- failed can depends on configured because a package can depend on
+-- several other packages and if one of the deps fail then we fail
+-- but we still depend on the other ones that did not fail:
+stateDependencyRelation (Failed    _ _) (Configured  _) = True
+stateDependencyRelation (Failed    _ _) (Processing _)  = True
+stateDependencyRelation (Failed    _ _) (Installed _ _) = True
+stateDependencyRelation (Failed    _ _) (Failed    _ _) = True
+
+stateDependencyRelation _               _               = False
+
+-- | A 'ConfiguredPackage' is valid if the flag assignment is total and if
+-- in the configuration given by the flag assignment, all the package
+-- dependencies are satisfied by the specified packages.
+--
+configuredPackageValid :: Platform -> CompilerInfo -> ConfiguredPackage -> Bool
+configuredPackageValid platform cinfo pkg =
+  null (configuredPackageProblems platform cinfo pkg)
+
+data PackageProblem = DuplicateFlag FlagName
+                    | MissingFlag   FlagName
+                    | ExtraFlag     FlagName
+                    | DuplicateDeps [PackageIdentifier]
+                    | MissingDep    Dependency
+                    | ExtraDep      PackageIdentifier
+                    | InvalidDep    Dependency PackageIdentifier
+
+showPackageProblem :: PackageProblem -> String
+showPackageProblem (DuplicateFlag (FlagName flag)) =
+  "duplicate flag in the flag assignment: " ++ flag
+
+showPackageProblem (MissingFlag (FlagName flag)) =
+  "missing an assignment for the flag: " ++ flag
+
+showPackageProblem (ExtraFlag (FlagName flag)) =
+  "extra flag given that is not used by the package: " ++ flag
+
+showPackageProblem (DuplicateDeps pkgids) =
+     "duplicate packages specified as selected dependencies: "
+  ++ intercalate ", " (map display pkgids)
+
+showPackageProblem (MissingDep dep) =
+     "the package has a dependency " ++ display dep
+  ++ " but no package has been selected to satisfy it."
+
+showPackageProblem (ExtraDep pkgid) =
+     "the package configuration specifies " ++ display pkgid
+  ++ " but (with the given flag assignment) the package does not actually"
+  ++ " depend on any version of that package."
+
+showPackageProblem (InvalidDep dep pkgid) =
+     "the package depends on " ++ display dep
+  ++ " but the configuration specifies " ++ display pkgid
+  ++ " which does not satisfy the dependency."
+
+configuredPackageProblems :: Platform -> CompilerInfo
+                          -> ConfiguredPackage -> [PackageProblem]
+configuredPackageProblems platform cinfo
+  (ConfiguredPackage pkg specifiedFlags stanzas specifiedDeps) =
+     [ DuplicateFlag flag | ((flag,_):_) <- duplicates specifiedFlags ]
+  ++ [ MissingFlag flag | OnlyInLeft  flag <- mergedFlags ]
+  ++ [ ExtraFlag   flag | OnlyInRight flag <- mergedFlags ]
+  ++ [ DuplicateDeps pkgs
+     | pkgs <- duplicatesBy (comparing packageName) specifiedDeps ]
+  ++ [ MissingDep dep       | OnlyInLeft  dep       <- mergedDeps ]
+  ++ [ ExtraDep       pkgid | OnlyInRight     pkgid <- mergedDeps ]
+  ++ [ InvalidDep dep pkgid | InBoth      dep pkgid <- mergedDeps
+                            , not (packageSatisfiesDependency pkgid dep) ]
+  where
+    mergedFlags = mergeBy compare
+      (sort $ map flagName (genPackageFlags (packageDescription pkg)))
+      (sort $ map fst specifiedFlags)
+
+    mergedDeps = mergeBy
+      (\dep pkgid -> dependencyName dep `compare` packageName pkgid)
+      (sortBy (comparing dependencyName) requiredDeps)
+      (sortBy (comparing packageName)    specifiedDeps)
+
+    packageSatisfiesDependency
+      (PackageIdentifier name  version)
+      (Dependency        name' versionRange) = assert (name == name') $
+        version `withinRange` versionRange
+
+    dependencyName (Dependency name _) = name
+
+    requiredDeps :: [Dependency]
+    requiredDeps =
+      --TODO: use something lower level than finalizePackageDescription
+      case finalizePackageDescription specifiedFlags
+         (const True)
+         platform cinfo
+         []
+         (enableStanzas stanzas $ packageDescription pkg) of
+        Right (resolvedPkg, _) -> externalBuildDepends resolvedPkg
+        Left  _ -> error "configuredPackageInvalidDeps internal error"

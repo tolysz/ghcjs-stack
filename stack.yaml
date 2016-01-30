@@ -1,0 +1,8 @@
+flags: {}
+extra-package-dbs: []
+packages:
+- '.'
+extra-deps:
+- possible-0.1.0.5
+- integer-gmp-0.5.1.0
+resolver: lts-5.1
