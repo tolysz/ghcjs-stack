@@ -1,13 +1,10 @@
 #!/bin/bash
 
+wget "http://ghcjs.luite.com/master-$(date +%Y%m%d).tar.gz" -c -O master.tar.gz
 
-
-wget "http://ghcjs.luite.com/master-$(date +%Y%m%d).tar.gz" -O master.tar.gz
-
-
-export RESOLVER=${R:-lts-5.1}
+export RESOLVER=${R:-lts-5.8}
 stack config set resolver $RESOLVER
-export EXTRA=${E:-9005001}
+export EXTRA=${E:-9005008}
 mkdir cache
 
 tar -zxf master.tar.gz
