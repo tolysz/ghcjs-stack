@@ -38,6 +38,9 @@ executable boot-ng
                              -- stage2
                              , async
                              , aeson
+                             , tagged
+                             , nats
+                             , fail
                              , attoparsec
                              , case-insensitive
                              , dlist
@@ -54,3 +57,4 @@ executable boot-ng
                              , vector
                              -- my
                              , possible
+                             , semigroups

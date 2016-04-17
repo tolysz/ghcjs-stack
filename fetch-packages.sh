@@ -2,11 +2,12 @@
 
 . lib.sh
 
-
+export KEEP=ghcjs-boot/boot
 export DEST=new-boot
 
 rm -r $DEST
 mkdir $DEST
+
 
 stack list-dependencies --resolver $RESOLVER | \
 while read i j; do
@@ -16,5 +17,6 @@ mv $i $DEST
 
 done
 
-cp -r special/cabal $DEST
-cp -r special/Win32 $DEST
+cp -r $KEEP/integer-gmp $DEST
+cp -r $KEEP/cabal $DEST
+cp -r $KEEP/Win32 $DEST
