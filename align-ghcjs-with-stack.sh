@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# wget "http://ghcjs.luite.com/master-$(date +%Y%m%d).tar.gz" -c -O master.tar.gz
+wget "http://ghcjs.luite.com/master-$(date +%Y%m%d).tar.gz" -c -O master.tar.gz
 #lts-5.12
 
 #R=nightly-2016-03-19
