@@ -4,8 +4,8 @@ wget "http://ghcjs.luite.com/master-$(date +%Y%m%d).tar.gz" -c -O master.tar.gz
 #lts-5.12
 
 #R=nightly-2016-03-19
-R=nightly-2016-04-16
-E=820160416
+R=nightly-2016-04-20
+E=820160420
 
 export RESOLVER=${R:-lts-5.8}
 stack config set resolver $RESOLVER
