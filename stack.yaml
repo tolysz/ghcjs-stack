@@ -5,4 +5,4 @@ packages:
 extra-deps:
 - possible-0.1.0.5
 - integer-gmp-0.5.1.0
-resolver: nightly-2016-04-20
+resolver: nightly-2016-04-28
