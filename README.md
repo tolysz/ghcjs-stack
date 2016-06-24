@@ -17,8 +17,5 @@ http://tolysz.org/ghcjs
 
 But this is a proof of concept; and we need to find a way to make it more streamline.
 
-sample use:
-https://github.com/tolysz/video/blob/ghcjs/client/stack.yaml
-
 Or even easier:
 https://github.com/tolysz/reflex-todomvc @ stack-experimental branch
