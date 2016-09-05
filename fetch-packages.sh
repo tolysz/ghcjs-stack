@@ -4,6 +4,7 @@
 
 export KEEP=ghcjs-boot/boot
 export DEST=new-boot
+export SPECIAL=special
 
 rm -r $DEST
 mkdir $DEST
@@ -18,5 +19,6 @@ mv $i $DEST
 done
 
 cp -r $KEEP/integer-gmp $DEST
-cp -r $KEEP/cabal $DEST
+#cp -r $SPECIAL/integer-gmp $DEST
+cp -r $SPECIAL/cabal $DEST
 cp -r $KEEP/Win32 $DEST
