@@ -1,5 +1,7 @@
 # ghcjs-stack
-align ghcjs with stack
+align ghcjs with stack (lts6 branch)
+
+#depricated in favour of https://github.com/tolysz/prepare-ghcjs
 
 
 Allow to create ghcjs installation archive which has the same versions as the `stack --resolver`
